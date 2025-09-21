@@ -35,12 +35,76 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
   const [polling, setPolling] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticResults, setDiagnosticResults] = useState<any>(null);
+  
+  // Estados para CPF
+  const [cpf, setCpf] = useState('');
+  const [showCpfInput, setShowCpfInput] = useState(false);
+  const [cpfError, setCpfError] = useState('');
 
   const planPrices = {
     monthly: { value: 69.99, label: 'Mensal - R$ 69,99' },
     quarterly: { value: 149.97, label: 'Trimestral - R$ 149,97' },
     annual: { value: 359.88, label: 'Anual - R$ 359,88' }
   };
+
+  // Função para formatar CPF
+  const formatCpf = (value: string) => {
+    const numbers = value.replace(/\D/g, '');
+    if (numbers.length <= 11) {
+      return numbers.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+    }
+    return value;
+  };
+
+  // Função para validar CPF
+  const validateCpf = (cpf: string) => {
+    const numbers = cpf.replace(/\D/g, '');
+    
+    if (numbers.length !== 11) {
+      return false;
+    }
+    
+    // Verifica se todos os dígitos são iguais
+    if (/^(\d)\1+$/.test(numbers)) {
+      return false;
+    }
+    
+    return true;
+  };
+
+  // Handler para mudança no CPF
+  const handleCpfChange = (value: string) => {
+    const formatted = formatCpf(value);
+    setCpf(formatted);
+    
+    if (formatted.length > 0) {
+      if (validateCpf(formatted)) {
+        setCpfError('');
+      } else {
+        setCpfError('CPF inválido');
+      }
+    } else {
+      setCpfError('');
+    }
+  };
+
+  // Verificar se deve mostrar campo CPF quando PIX for selecionado
+  useEffect(() => {
+    if (paymentMethod === 'PIX') {
+      // Verificar se usuário já tem CPF nos metadados
+      const userCpf = user?.user_metadata?.cpf;
+      if (!userCpf) {
+        setShowCpfInput(true);
+      } else {
+        setCpf(userCpf);
+        setShowCpfInput(false);
+      }
+    } else {
+      setShowCpfInput(false);
+      setCpf('');
+      setCpfError('');
+    }
+  }, [paymentMethod, user]);
 
   // 🔍 DIAGNÓSTICO ASAAS
   const runDiagnostics = async () => {
@@ -101,13 +165,24 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
       return;
     }
 
+    // Validar CPF para PIX
+    if (paymentMethod === 'PIX') {
+      const currentCpf = cpf || user?.user_metadata?.cpf;
+      if (!currentCpf || !validateCpf(currentCpf)) {
+        setCpfError('CPF é obrigatório para pagamentos PIX');
+        return;
+      }
+    }
+
     setLoading(true);
     try {
+      const currentCpf = cpf || user?.user_metadata?.cpf;
       console.log('🚀 Starting payment creation:', { 
         planType, 
         billingType: paymentMethod,
         userId: user.id,
-        userEmail: user.email 
+        userEmail: user.email,
+        hasCpf: !!currentCpf
       });
       
       const session = await supabase.auth.getSession();
@@ -119,11 +194,18 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
       console.log('🔑 Session found, calling edge function...');
 
       // Tentar a chamada da edge function
+      const requestBody: any = {
+        planType,
+        billingType: paymentMethod
+      };
+
+      // Incluir CPF se for PIX
+      if (paymentMethod === 'PIX' && currentCpf) {
+        requestBody.cpf = currentCpf.replace(/\D/g, '');
+      }
+
       const functionCall = supabase.functions.invoke('create-asaas-payment', {
-        body: {
-          planType,
-          billingType: paymentMethod
-        }
+        body: requestBody
       });
 
       // Timeout para detectar problemas de conectividade
@@ -512,10 +594,35 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
           </RadioGroup>
         </div>
 
+        {/* Campo CPF para PIX */}
+        {showCpfInput && paymentMethod === 'PIX' && (
+          <div className="space-y-2 p-4 bg-orange-50 border border-orange-200 rounded-lg">
+            <div className="flex items-center gap-2 text-orange-700">
+              <AlertCircle className="w-4 h-4" />
+              <Label className="text-sm font-medium">CPF necessário para PIX</Label>
+            </div>
+            <p className="text-xs text-orange-600 mb-2">
+              O CPF é obrigatório para gerar pagamentos PIX no Brasil
+            </p>
+            <div className="space-y-1">
+              <Input
+                placeholder="000.000.000-00"
+                value={cpf}
+                onChange={(e) => handleCpfChange(e.target.value)}
+                maxLength={14}
+                className={cpfError ? "border-red-500" : ""}
+              />
+              {cpfError && (
+                <p className="text-xs text-red-500">{cpfError}</p>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-2">
           <Button
             onClick={createPayment}
-            disabled={loading}
+            disabled={loading || (paymentMethod === 'PIX' && showCpfInput && (!cpf || !!cpfError))}
             className="w-full bg-gradient-to-r from-purple-500 to-pink-500"
           >
             {loading ? (

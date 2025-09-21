@@ -121,12 +121,18 @@ serve(async (req) => {
       throw new Error("Invalid JSON in request body");
     }
 
-    const { planType, billingType } = requestBody;
+    const { planType, billingType, cpf } = requestBody;
     
     if (!billingType || !['PIX', 'CREDIT_CARD'].includes(billingType)) {
       throw new Error("Invalid billing type. Must be PIX or CREDIT_CARD");
     }
-    logStep("📋 Payment data received", { planType, billingType });
+
+    // Validar CPF para PIX
+    if (billingType === 'PIX' && !cpf) {
+      throw new Error("CPF é obrigatório para pagamentos PIX");
+    }
+
+    logStep("📋 Payment data received", { planType, billingType, hasCpf: !!cpf });
 
     // 🔧 VALIDAÇÃO E CORREÇÃO DA CONFIGURAÇÃO ASAAS
     const rawApiKey = Deno.env.get("ASAAS_API_KEY");
@@ -180,7 +186,7 @@ serve(async (req) => {
         body: JSON.stringify({
           name: user.user_metadata?.name || user.email,
           email: user.email,
-          cpfCnpj: user.user_metadata?.cpf || null,
+          cpfCnpj: cpf || user.user_metadata?.cpf || null,
         }),
       });
 
