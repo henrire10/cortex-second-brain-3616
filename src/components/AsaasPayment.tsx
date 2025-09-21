@@ -156,139 +156,104 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
   };
 
   const createPayment = async () => {
-    if (!user) {
+    if (!user?.email) {
       toast({
-        title: "Erro de autenticação",
-        description: "Usuário não autenticado. Faça login novamente.",
+        title: "Erro",
+        description: "Usuário não autenticado",
         variant: "destructive",
       });
       return;
     }
 
-    // Validar CPF para PIX
-    if (paymentMethod === 'PIX') {
-      const currentCpf = cpf || user?.user_metadata?.cpf;
-      if (!currentCpf || !validateCpf(currentCpf)) {
-        setCpfError('CPF é obrigatório para pagamentos PIX');
-        return;
-      }
+    if (paymentMethod === 'PIX' && !cpf) {
+      toast({
+        title: "CPF obrigatório",
+        description: "Por favor, informe o CPF para pagamentos PIX",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (paymentMethod === 'PIX' && !validateCpf(cpf)) {
+      toast({
+        title: "CPF inválido",
+        description: "Por favor, verifique o CPF informado",
+        variant: "destructive",
+      });
+      return;
     }
 
     setLoading(true);
+    setPayment(null);
+
     try {
-      const currentCpf = cpf || user?.user_metadata?.cpf;
-      console.log('🚀 Starting payment creation:', { 
-        planType, 
-        billingType: paymentMethod,
-        userId: user.id,
-        userEmail: user.email,
-        hasCpf: !!currentCpf
-      });
+      console.log("🚀 Iniciando criação de pagamento", { planType, paymentMethod, hasCpf: !!cpf });
       
-      const session = await supabase.auth.getSession();
-      if (!session.data.session?.access_token) {
-        console.error('❌ No access token found');
-        throw new Error('Sessão expirada. Faça login novamente.');
-      }
+      const { data, error } = await Promise.race([
+        supabase.functions.invoke('create-asaas-payment', {
+          body: {
+            planType,
+            billingType: paymentMethod,
+            cpf: paymentMethod === 'PIX' ? cpf : undefined
+          }
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout: Operação demorou mais que 15 segundos')), 15000)
+        )
+      ]) as { data: any; error: any };
 
-      console.log('🔑 Session found, calling edge function...');
-
-      // Tentar a chamada da edge function
-      const requestBody: any = {
-        planType,
-        billingType: paymentMethod
-      };
-
-      // Incluir CPF se for PIX
-      if (paymentMethod === 'PIX' && currentCpf) {
-        requestBody.cpf = currentCpf.replace(/\D/g, '');
-      }
-
-      const functionCall = supabase.functions.invoke('create-asaas-payment', {
-        body: requestBody
-      });
-
-      // Timeout para detectar problemas de conectividade
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Timeout: A requisição demorou muito para responder')), 30000);
-      });
-
-      const { data, error } = await Promise.race([functionCall, timeoutPromise]) as any;
-
-      console.log('📊 Payment creation response:', { 
-        data, 
-        error,
-        hasData: !!data,
-        errorMessage: error?.message 
-      });
+      console.log("📊 Resposta completa da edge function:", JSON.stringify({ data, error }, null, 2));
 
       if (error) {
-        console.error('❌ Supabase function error:', error);
-        // Verificar se é erro de rede
-        if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
-          throw new Error('Erro de conexão. Verifique sua internet e tente novamente.');
-        }
-        throw new Error(error.message || 'Erro na função de pagamento');
+        console.error("❌ Erro na edge function:", error);
+        throw new Error(error.message || 'Erro ao criar pagamento');
       }
 
       if (!data) {
-        console.error('❌ No data returned from function');
-        throw new Error('Nenhum dado retornado da função. Tente novamente.');
+        console.error("❌ Função retornou dados vazios");
+        throw new Error('Nenhum dado retornado da função de pagamento');
       }
 
-      if (!data.id) {
-        console.error('❌ Invalid payment data:', data);
-        throw new Error('Dados de pagamento inválidos recebidos.');
+      console.log("📋 Dados recebidos:", { 
+        id: data.id, 
+        status: data.status,
+        hasPixQr: !!data.pixQrCode,
+        hasPixCopy: !!data.pixCopyAndPaste,
+        allFields: Object.keys(data)
+      });
+
+      // Relaxar validação temporariamente para debug
+      if (!data.id && !data.paymentId) {
+        console.error("❌ Dados sem ID:", data);
+        throw new Error('Dados de pagamento sem identificador');
       }
 
-      console.log('✅ Payment created successfully:', data.id);
+      console.log("✅ Definindo dados do pagamento...");
       setPayment(data);
-      
-      // Iniciar polling para PIX
+
       if (paymentMethod === 'PIX') {
-        console.log('🔄 Starting PIX polling for payment:', data.id);
-        startPolling(data.id);
+        console.log("🔄 Iniciando polling para PIX...");
+        startPolling(data.id || data.paymentId);
       }
 
       toast({
-        title: "Cobrança criada com sucesso!",
-        description: `${paymentMethod === 'PIX' ? 'QR Code PIX' : 'Link do cartão'} gerado com sucesso.`,
+        title: "Pagamento criado!",
+        description: paymentMethod === 'PIX' 
+          ? "Use o QR Code ou código PIX para efetuar o pagamento" 
+          : "Clique no link para efetuar o pagamento",
       });
+
     } catch (error) {
-      console.error('💥 Error creating payment:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
+      console.error("💥 Erro crítico na criação do pagamento:", error);
       
-      // 🎯 MAPEAMENTO INTELIGENTE DE ERROS
-      let friendlyMessage = errorMessage;
-      if (errorMessage.includes('Failed to fetch')) {
-        friendlyMessage = 'Erro de conexão com o servidor. Verifique sua internet e tente novamente.';
-      } else if (errorMessage.includes('Authentication failed')) {
-        friendlyMessage = 'Sessão expirada. Faça login novamente.';
-      } else if (errorMessage.includes('ASAAS_API_KEY')) {
-        friendlyMessage = 'Erro de configuração do sistema. Contate o suporte.';
-      } else if (errorMessage.includes('401') || errorMessage.includes('autenticação')) {
-        friendlyMessage = 'Erro de autenticação com Asaas. Verifique a configuração da API key.';
-      } else if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
-        friendlyMessage = 'A operação demorou muito para responder. Verifique sua conexão e tente novamente.';
-      }
-      
+      const errorMessage = error instanceof Error ? error.message : String(error);
       toast({
         title: "Erro ao criar pagamento",
-        description: friendlyMessage,
+        description: errorMessage,
         variant: "destructive",
-        action: (
-          <Button 
-            variant="outline" 
-            size="sm" 
-            onClick={runDiagnostics}
-            className="ml-2"
-          >
-            <Settings className="w-4 h-4 mr-1" />
-            Diagnóstico
-          </Button>
-        ),
       });
     } finally {
+      console.log("🏁 Finalizando criação do pagamento, resetando loading...");
       setLoading(false);
     }
   };
@@ -635,15 +600,33 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
             )}
           </Button>
           
-          <Button
-            variant="outline"
-            onClick={runDiagnostics}
-            disabled={loading}
-            className="w-full"
-          >
-            <Settings className="w-4 h-4 mr-2" />
-            {loading ? "Executando..." : "🔍 Testar Configuração"}
-          </Button>
+          {loading && (
+            <Button 
+              onClick={() => {
+                setLoading(false);
+                toast({
+                  title: "Operação cancelada",
+                  description: "Tente novamente se necessário",
+                });
+              }}
+              variant="outline"
+              className="w-full"
+            >
+              Cancelar
+            </Button>
+          )}
+          
+          {!loading && (
+            <Button
+              variant="outline"
+              onClick={runDiagnostics}
+              disabled={loading}
+              className="w-full"
+            >
+              <Settings className="w-4 h-4 mr-2" />
+              🔍 Testar Configuração
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>
