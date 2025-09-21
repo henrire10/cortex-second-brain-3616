@@ -1,0 +1,26 @@
+workflows:
+  ios-release-build:
+    name: iOS Release Build
+    instance_type: mac_mini_m1
+    environment:
+      node: 20
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Install Dependencies
+        script: | 
+          npm install --legacy-peer-deps
+      - name: Build Web App
+        script: | 
+          npm run build
+      - name: Sync Capacitor for iOS
+        script: | 
+          npx cap sync ios
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing: # <-- NOVO BLOCO ADICIONADO
+      app_store_connect:
+        auth:
+          api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+          key_id: $APP_STORE_CONNECT_KEY_ID
+          issuer_id: $APP_STORE_CONNECT_ISSUER_ID

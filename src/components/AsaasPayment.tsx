@@ -1,0 +1,544 @@
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Separator } from '@/components/ui/separator';
+import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/integrations/supabase/client';
+import { useToast } from '@/hooks/use-toast';
+import { 
+  CreditCard, 
+  Loader2, 
+  QrCode, 
+  CheckCircle,
+  Copy,
+  ExternalLink,
+  Settings,
+  AlertCircle
+} from 'lucide-react';
+
+interface AsaasPaymentProps {
+  planType: 'monthly' | 'quarterly' | 'annual';
+  onSuccess?: () => void;
+}
+
+export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess }) => {
+  const { user, refreshSubscription } = useAuth();
+  const { toast } = useToast();
+  
+  const [loading, setLoading] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<'PIX' | 'CREDIT_CARD'>('PIX');
+  const [payment, setPayment] = useState<any>(null);
+  const [polling, setPolling] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [diagnosticResults, setDiagnosticResults] = useState<any>(null);
+
+  const planPrices = {
+    monthly: { value: 69.99, label: 'Mensal - R$ 69,99' },
+    quarterly: { value: 149.97, label: 'Trimestral - R$ 149,97' },
+    annual: { value: 359.88, label: 'Anual - R$ 359,88' }
+  };
+
+  // 🔍 DIAGNÓSTICO ASAAS
+  const runDiagnostics = async () => {
+    setLoading(true);
+    try {
+      console.log('🔍 Executando diagnósticos...');
+      
+      const response = await supabase.functions.invoke('asaas-diagnostics');
+      
+      if (response.error) {
+        throw new Error(response.error.message || 'Erro ao executar diagnósticos');
+      }
+
+      const results = response.data;
+      setDiagnosticResults(results);
+      setShowDiagnostics(true);
+      
+      console.log('📊 Resultados do diagnóstico:', results);
+      
+      if (results.status === 'healthy') {
+        toast({
+          title: "✅ Configuração OK",
+          description: "A integração com Asaas está funcionando corretamente.",
+          variant: "default",
+        });
+      } else if (results.status === 'warning') {
+        toast({
+          title: "⚠️ Avisos encontrados",
+          description: "A integração funciona, mas há alertas na configuração.",
+          variant: "default",
+        });
+      } else {
+        toast({
+          title: "❌ Problemas detectados",
+          description: "Encontrados problemas na configuração do Asaas.",
+          variant: "destructive",
+        });
+      }
+    } catch (error: any) {
+      console.error('💥 Erro no diagnóstico:', error);
+      toast({
+        title: "Erro no diagnóstico",
+        description: error.message || 'Não foi possível executar o diagnóstico.',
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const createPayment = async () => {
+    if (!user) {
+      toast({
+        title: "Erro de autenticação",
+        description: "Usuário não autenticado. Faça login novamente.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      console.log('🚀 Starting payment creation:', { 
+        planType, 
+        billingType: paymentMethod,
+        userId: user.id,
+        userEmail: user.email 
+      });
+      
+      const session = await supabase.auth.getSession();
+      if (!session.data.session?.access_token) {
+        console.error('❌ No access token found');
+        throw new Error('Sessão expirada. Faça login novamente.');
+      }
+
+      console.log('🔑 Session found, calling edge function...');
+
+      // Tentar a chamada da edge function
+      const functionCall = supabase.functions.invoke('create-asaas-payment', {
+        body: {
+          planType,
+          billingType: paymentMethod
+        }
+      });
+
+      // Timeout para detectar problemas de conectividade
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Timeout: A requisição demorou muito para responder')), 30000);
+      });
+
+      const { data, error } = await Promise.race([functionCall, timeoutPromise]) as any;
+
+      console.log('📊 Payment creation response:', { 
+        data, 
+        error,
+        hasData: !!data,
+        errorMessage: error?.message 
+      });
+
+      if (error) {
+        console.error('❌ Supabase function error:', error);
+        // Verificar se é erro de rede
+        if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+          throw new Error('Erro de conexão. Verifique sua internet e tente novamente.');
+        }
+        throw new Error(error.message || 'Erro na função de pagamento');
+      }
+
+      if (!data) {
+        console.error('❌ No data returned from function');
+        throw new Error('Nenhum dado retornado da função. Tente novamente.');
+      }
+
+      if (!data.id) {
+        console.error('❌ Invalid payment data:', data);
+        throw new Error('Dados de pagamento inválidos recebidos.');
+      }
+
+      console.log('✅ Payment created successfully:', data.id);
+      setPayment(data);
+      
+      // Iniciar polling para PIX
+      if (paymentMethod === 'PIX') {
+        console.log('🔄 Starting PIX polling for payment:', data.id);
+        startPolling(data.id);
+      }
+
+      toast({
+        title: "Cobrança criada com sucesso!",
+        description: `${paymentMethod === 'PIX' ? 'QR Code PIX' : 'Link do cartão'} gerado com sucesso.`,
+      });
+    } catch (error) {
+      console.error('💥 Error creating payment:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
+      
+      // 🎯 MAPEAMENTO INTELIGENTE DE ERROS
+      let friendlyMessage = errorMessage;
+      if (errorMessage.includes('Failed to fetch')) {
+        friendlyMessage = 'Erro de conexão com o servidor. Verifique sua internet e tente novamente.';
+      } else if (errorMessage.includes('Authentication failed')) {
+        friendlyMessage = 'Sessão expirada. Faça login novamente.';
+      } else if (errorMessage.includes('ASAAS_API_KEY')) {
+        friendlyMessage = 'Erro de configuração do sistema. Contate o suporte.';
+      } else if (errorMessage.includes('401') || errorMessage.includes('autenticação')) {
+        friendlyMessage = 'Erro de autenticação com Asaas. Verifique a configuração da API key.';
+      } else if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
+        friendlyMessage = 'A operação demorou muito para responder. Verifique sua conexão e tente novamente.';
+      }
+      
+      toast({
+        title: "Erro ao criar pagamento",
+        description: friendlyMessage,
+        variant: "destructive",
+        action: (
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={runDiagnostics}
+            className="ml-2"
+          >
+            <Settings className="w-4 h-4 mr-1" />
+            Diagnóstico
+          </Button>
+        ),
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startPolling = (paymentId: string) => {
+    setPolling(true);
+    console.log('🔄 Starting payment polling for:', paymentId);
+    
+    const poll = async () => {
+      try {
+        console.log('🔍 Checking payment status for:', paymentId);
+        
+        const session = await supabase.auth.getSession();
+        if (!session.data.session?.access_token) {
+          console.error('❌ No access token found during polling');
+          throw new Error('Sessão expirada durante verificação');
+        }
+
+        const { data, error } = await supabase.functions.invoke('check-asaas-payment', {
+          body: { paymentId }
+        });
+
+        console.log('📊 Payment status response:', { 
+          data, 
+          error,
+          status: data?.status 
+        });
+
+        if (error) {
+          console.error('❌ Error checking payment:', error);
+          if (error.message?.includes('Failed to fetch')) {
+            throw new Error('Erro de conexão durante verificação');
+          }
+          throw error;
+        }
+
+        if (!data) {
+          console.error('❌ No data returned from payment check');
+          throw new Error('Erro ao verificar status do pagamento');
+        }
+
+        if (data.status === 'CONFIRMED' || data.status === 'RECEIVED') {
+          console.log('✅ Payment confirmed!', data.status);
+          setPolling(false);
+          await refreshSubscription();
+          toast({
+            title: "Pagamento confirmado!",
+            description: "Sua assinatura foi ativada com sucesso.",
+          });
+          onSuccess?.();
+          return;
+        }
+
+        console.log('⏳ Payment still pending, continuing polling...', data.status);
+        // Continuar polling se ainda não foi confirmado
+        setTimeout(poll, 5000);
+      } catch (error) {
+        console.error('💥 Erro ao verificar pagamento:', error);
+        setPolling(false);
+        const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
+        toast({
+          title: "Erro na verificação",
+          description: errorMessage,
+          variant: "destructive",
+        });
+      }
+    };
+
+    poll();
+  };
+
+  const copyPixCode = () => {
+    if (payment?.pixCopyAndPaste) {
+      navigator.clipboard.writeText(payment.pixCopyAndPaste);
+      toast({
+        title: "Código PIX copiado!",
+        description: "Cole no seu app bancário para pagar.",
+      });
+    }
+  };
+
+  const handleCardPayment = async () => {
+    // Para cartão de crédito, redirecionar para URL da fatura
+    if (payment?.invoiceUrl) {
+      window.open(payment.invoiceUrl, '_blank');
+    }
+  };
+
+  // 🔍 MODAL DE DIAGNÓSTICOS
+  if (showDiagnostics && diagnosticResults) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold">🔍 Diagnóstico Asaas</h3>
+          <Button 
+            variant="outline" 
+            onClick={() => setShowDiagnostics(false)}
+          >
+            Voltar
+          </Button>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center space-x-2">
+              <Badge variant={
+                diagnosticResults.status === 'healthy' ? 'default' : 
+                diagnosticResults.status === 'warning' ? 'secondary' : 'destructive'
+              }>
+                {diagnosticResults.status === 'healthy' ? '✅ Saudável' : 
+                 diagnosticResults.status === 'warning' ? '⚠️ Avisos' : '❌ Problemas'}
+              </Badge>
+              <span className="text-sm text-muted-foreground">
+                Ambiente: {diagnosticResults.environment}
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Configuração */}
+            <div>
+              <h4 className="font-medium mb-2">📋 Configuração</h4>
+              <div className="space-y-1 text-sm">
+                <p>✅ API Key: {diagnosticResults.configuration.hasApiKey ? 'Configurada' : '❌ Não configurada'}</p>
+                <p>✅ Base URL: {diagnosticResults.configuration.autoDetectedBaseUrl}</p>
+                {diagnosticResults.configuration.warnings.map((warning: string, idx: number) => (
+                  <p key={idx} className="text-yellow-600">⚠️ {warning}</p>
+                ))}
+                {diagnosticResults.configuration.fixes.map((fix: string, idx: number) => (
+                  <p key={idx} className="text-green-600">🔧 {fix}</p>
+                ))}
+              </div>
+            </div>
+
+            {/* Testes de Conectividade */}
+            <Separator />
+            <div>
+              <h4 className="font-medium mb-2">🧪 Testes de Conectividade</h4>
+              <div className="space-y-1 text-sm">
+                <p>
+                  {diagnosticResults.connectivity.basicAuth.status === 'success' ? '✅' : '❌'} 
+                  Autenticação: {diagnosticResults.connectivity.basicAuth.status}
+                  {diagnosticResults.connectivity.basicAuth.error && (
+                    <span className="text-red-600 ml-2">({diagnosticResults.connectivity.basicAuth.error})</span>
+                  )}
+                </p>
+                <p>
+                  {diagnosticResults.connectivity.customerList.status === 'success' ? '✅' : '❌'} 
+                  Lista de clientes: {diagnosticResults.connectivity.customerList.status}
+                </p>
+                <p>
+                  {diagnosticResults.connectivity.apiHealth.status === 'success' ? '✅' : '❌'} 
+                  Saúde da API: {diagnosticResults.connectivity.apiHealth.status}
+                </p>
+              </div>
+            </div>
+
+            {/* Resumo */}
+            <Separator />
+            <div>
+              <h4 className="font-medium mb-2">📊 Resumo</h4>
+              <div className="space-y-1 text-sm">
+                <p>Pode criar pagamentos: {diagnosticResults.summary.canCreatePayments ? '✅ Sim' : '❌ Não'}</p>
+                <p>Pode verificar pagamentos: {diagnosticResults.summary.canCheckPayments ? '✅ Sim' : '❌ Não'}</p>
+              </div>
+            </div>
+
+            {/* Recomendações */}
+            {diagnosticResults.recommendations.length > 0 && (
+              <>
+                <Separator />
+                <div>
+                  <h4 className="font-medium mb-2">💡 Recomendações</h4>
+                  <ul className="space-y-1 text-sm">
+                    {diagnosticResults.recommendations.map((rec: string, idx: number) => (
+                      <li key={idx}>• {rec}</li>
+                    ))}
+                  </ul>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        <div className="flex space-x-2">
+          <Button onClick={runDiagnostics} disabled={loading}>
+            {loading ? "Executando..." : "🔄 Executar Novamente"}
+          </Button>
+          <Button 
+            variant="outline" 
+            onClick={() => {
+              setShowDiagnostics(false);
+              setDiagnosticResults(null);
+            }}
+          >
+            Fechar
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // Se já temos um pagamento, mostrar os detalhes
+  if (payment) {
+    return (
+      <Card className="w-full max-w-md mx-auto">
+        <CardHeader>
+          <CardTitle className="text-center flex items-center justify-center gap-2">
+            {paymentMethod === 'PIX' && <QrCode className="w-5 h-5 text-green-600" />}
+            {paymentMethod === 'CREDIT_CARD' && <CreditCard className="w-5 h-5 text-blue-600" />}
+            
+            {paymentMethod === 'PIX' && 'Pagamento PIX'}
+            {paymentMethod === 'CREDIT_CARD' && 'Cartão de Crédito'}
+          </CardTitle>
+          <div className="text-center">
+            <Badge variant="outline">
+              {planPrices[planType].label}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {paymentMethod === 'PIX' && (
+            <div className="text-center space-y-4">
+              {payment.pixQrCode && (
+                <div className="bg-white p-4 rounded-lg border">
+                  <img src={`data:image/png;base64,${payment.pixQrCode}`} alt="QR Code PIX" className="mx-auto" />
+                </div>
+              )}
+              
+              {payment.pixCopyAndPaste && (
+                <div className="space-y-2">
+                  <Label className="text-sm text-gray-600">Código PIX:</Label>
+                  <div className="flex gap-2">
+                    <Input 
+                      value={payment.pixCopyAndPaste} 
+                      readOnly 
+                      className="text-xs"
+                    />
+                    <Button onClick={copyPixCode} size="sm" variant="outline">
+                      <Copy className="w-4 h-4" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+              
+              {polling && (
+                <div className="flex items-center justify-center gap-2 text-green-600">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="text-sm">Aguardando pagamento...</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {paymentMethod === 'CREDIT_CARD' && (
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600 text-center">
+                Clique no botão abaixo para finalizar o pagamento com cartão de crédito:
+              </p>
+              <Button onClick={handleCardPayment} className="w-full">
+                <ExternalLink className="w-4 h-4 mr-2" />
+                Pagar com Cartão
+              </Button>
+            </div>
+          )}
+
+          <div className="text-xs text-gray-500 text-center">
+            Vencimento: {new Date(payment.dueDate).toLocaleDateString('pt-BR')}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Interface inicial de seleção de pagamento
+  return (
+    <Card className="w-full max-w-md mx-auto">
+      <CardHeader>
+        <CardTitle className="text-center">Finalizar Pagamento</CardTitle>
+        <div className="text-center">
+          <Badge variant="outline" className="text-lg px-4 py-2">
+            {planPrices[planType].label}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <Label className="text-base font-medium">Escolha a forma de pagamento:</Label>
+          <RadioGroup value={paymentMethod} onValueChange={(value: any) => setPaymentMethod(value)} className="mt-3">
+            <div className="flex items-center space-x-2 p-3 border rounded-lg">
+              <RadioGroupItem value="PIX" id="pix" />
+              <QrCode className="w-5 h-5 text-green-600" />
+              <Label htmlFor="pix" className="flex-1 cursor-pointer">
+                PIX - Aprovação instantânea
+              </Label>
+            </div>
+            <div className="flex items-center space-x-2 p-3 border rounded-lg">
+              <RadioGroupItem value="CREDIT_CARD" id="credit" />
+              <CreditCard className="w-5 h-5 text-blue-600" />
+              <Label htmlFor="credit" className="flex-1 cursor-pointer">
+                Cartão de Crédito
+              </Label>
+            </div>
+          </RadioGroup>
+        </div>
+
+        <div className="space-y-2">
+          <Button
+            onClick={createPayment}
+            disabled={loading}
+            className="w-full bg-gradient-to-r from-purple-500 to-pink-500"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Criando cobrança...
+              </>
+            ) : (
+              'Continuar'
+            )}
+          </Button>
+          
+          <Button
+            variant="outline"
+            onClick={runDiagnostics}
+            disabled={loading}
+            className="w-full"
+          >
+            <Settings className="w-4 h-4 mr-2" />
+            {loading ? "Executando..." : "🔍 Testar Configuração"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
