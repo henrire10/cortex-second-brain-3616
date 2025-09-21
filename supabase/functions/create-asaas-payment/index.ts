@@ -242,6 +242,11 @@ serve(async (req) => {
       description: description,
       externalReference: user.id,
       enabledPaymentTypes: ["CREDIT_CARD", "PIX"],
+      // 🔥 FORÇAR GERAÇÃO DE PIX
+      ...(billingType === 'PIX' && {
+        pixAddressKey: user.email, // Usar email como chave PIX
+        pixQrCodeType: 'STATIC', // Garantir QR Code estático
+      })
     };
 
     const paymentResponse = await fetch(`${baseUrl}/payments`, {
@@ -273,11 +278,45 @@ serve(async (req) => {
       throw new Error("Payment creation failed - no payment ID returned");
     }
 
+    // 🔍 LOG DETALHADO DOS CAMPOS PIX
     logStep("✅ Payment created successfully", { 
       paymentId: payment.id, 
       status: payment.status,
-      environment
+      environment,
+      hasPixQrCode: !!payment.pixQrCode,
+      hasPixCopyAndPaste: !!payment.pixCopyAndPaste,
+      pixQrCodeLength: payment.pixQrCode?.length || 0,
+      pixCopyLength: payment.pixCopyAndPaste?.length || 0,
+      allFields: Object.keys(payment)
     });
+
+    // 🚨 GARANTIR QUE PIX SEJA GERADO
+    if (billingType === 'PIX' && (!payment.pixQrCode || !payment.pixCopyAndPaste)) {
+      logStep("⚠️ PIX fields missing, trying to generate", { 
+        pixQrCode: !!payment.pixQrCode,
+        pixCopyAndPaste: !!payment.pixCopyAndPaste
+      });
+      
+      // Se não tem PIX, tentar buscar novamente após delay
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      const pixResponse = await fetch(`${baseUrl}/payments/${payment.id}`, {
+        method: 'GET',
+        headers: {
+          'access_token': apiKey,
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      if (pixResponse.ok) {
+        const pixData = await pixResponse.json();
+        if (pixData.pixQrCode && pixData.pixCopyAndPaste) {
+          payment.pixQrCode = pixData.pixQrCode;
+          payment.pixCopyAndPaste = pixData.pixCopyAndPaste;
+          logStep("✅ PIX data retrieved on second attempt");
+        }
+      }
+    }
 
     return new Response(JSON.stringify({
       id: payment.id,

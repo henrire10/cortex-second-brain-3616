@@ -17,7 +17,8 @@ import {
   Copy,
   ExternalLink,
   Settings,
-  AlertCircle
+  AlertCircle,
+  AlertTriangle
 } from 'lucide-react';
 
 interface AsaasPaymentProps {
@@ -474,38 +475,92 @@ export const AsaasPayment: React.FC<AsaasPaymentProps> = ({ planType, onSuccess 
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {paymentMethod === 'PIX' && (
-            <div className="text-center space-y-4">
-              {payment.pixQrCode && (
-                <div className="bg-white p-4 rounded-lg border">
-                  <img src={`data:image/png;base64,${payment.pixQrCode}`} alt="QR Code PIX" className="mx-auto" />
-                </div>
-              )}
-              
-              {payment.pixCopyAndPaste && (
-                <div className="space-y-2">
-                  <Label className="text-sm text-gray-600">Código PIX:</Label>
-                  <div className="flex gap-2">
-                    <Input 
-                      value={payment.pixCopyAndPaste} 
-                      readOnly 
-                      className="text-xs"
-                    />
-                    <Button onClick={copyPixCode} size="sm" variant="outline">
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-              )}
-              
-              {polling && (
-                <div className="flex items-center justify-center gap-2 text-green-600">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">Aguardando pagamento...</span>
-                </div>
-              )}
+      {paymentMethod === 'PIX' && (
+        <div className="text-center space-y-4">
+          {/* 🔥 QR CODE PIX */}
+          {payment.pixQrCode ? (
+            <div className="bg-white p-4 rounded-lg border">
+              <img src={`data:image/png;base64,${payment.pixQrCode}`} alt="QR Code PIX" className="mx-auto" />
+            </div>
+          ) : (
+            <div className="bg-gray-100 p-8 rounded-lg border border-dashed">
+              <QrCode className="w-12 h-12 mx-auto text-gray-400 mb-2" />
+              <p className="text-sm text-gray-500">QR Code será gerado em instantes...</p>
             </div>
           )}
+          
+          {/* 🔥 CÓDIGO PIX COPIAR E COLAR */}
+          {payment.pixCopyAndPaste ? (
+            <div className="space-y-2">
+              <Label className="text-sm text-gray-600">Código PIX:</Label>
+              <div className="flex gap-2">
+                <Input 
+                  value={payment.pixCopyAndPaste} 
+                  readOnly 
+                  className="text-xs"
+                />
+                <Button onClick={copyPixCode} size="sm" variant="outline">
+                  <Copy className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label className="text-sm text-gray-600">Código PIX:</Label>
+              <div className="bg-gray-100 p-3 rounded border border-dashed">
+                <Loader2 className="w-4 h-4 animate-spin mx-auto mb-1" />
+                <p className="text-xs text-gray-500">Gerando código PIX...</p>
+              </div>
+            </div>
+          )}
+          
+          {/* 🔥 FALLBACK SE PIX NÃO FUNCIONAR */}
+          {!payment.pixQrCode && !payment.pixCopyAndPaste && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-4 h-4 text-yellow-600" />
+                <span className="text-sm font-medium text-yellow-800">PIX temporariamente indisponível</span>
+              </div>
+              <p className="text-xs text-yellow-700 mb-3">
+                Você pode pagar através do link abaixo ou aguardar a geração do PIX.
+              </p>
+              <div className="space-y-2">
+                {payment.invoiceUrl && (
+                  <Button 
+                    onClick={() => window.open(payment.invoiceUrl, '_blank')} 
+                    size="sm" 
+                    variant="outline"
+                    className="w-full"
+                  >
+                    <ExternalLink className="w-4 h-4 mr-2" />
+                    Abrir página de pagamento
+                  </Button>
+                )}
+                <Button 
+                  onClick={() => {
+                    setPayment(null);
+                    createPayment();
+                  }} 
+                  size="sm" 
+                  variant="outline"
+                  className="w-full"
+                  disabled={loading}
+                >
+                  <QrCode className="w-4 h-4 mr-2" />
+                  {loading ? "Gerando..." : "Tentar gerar PIX novamente"}
+                </Button>
+              </div>
+            </div>
+          )}
+          
+          {polling && (
+            <div className="flex items-center justify-center gap-2 text-green-600">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">Aguardando pagamento...</span>
+            </div>
+          )}
+        </div>
+      )}
 
           {paymentMethod === 'CREDIT_CARD' && (
             <div className="space-y-4">
